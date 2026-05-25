@@ -145,13 +145,14 @@ npx tsx src/api.ts
 | `POST /memory/documents/ingest` | 返回 `document_id`、`chunk_count` ≥ 1、`tree.admitted` ≥ 1 |
 | `POST /memory/query` | `llm_context_message` 含与文档相关的片段 |
 | `GET /memory/tree/stats` | `chunks` ≥ 1 |
-| `POST /memory/tree/flush` | 小文档也会生成摘要（未达 5 万 token 阈值时需 flush） |
-| `POST /memory/tree/query/source` | `source_id` 为 `doc:<namespace>:<document_id>`，`hits` 或 `total` ≥ 0 |
+| `POST /memory/tree/flush` | 默认仅密封 **7 天前** 的 L0；`max_age_ms: 0` 可立即密封陈旧 L0 |
+| `POST /memory/tree/flush/tree` | 立即强制密封指定树（小文档联调推荐） |
+| `POST /memory/tree/query/source` | `source_id` 为 `doc:<namespace>:<document_id>`，密封后 `hits` ≥ 0 |
 | `POST /memory/tree/summarize/preview` | 返回 `content` 与 `summarizer` 字段 |
 
 ### 4. 常见误区
 
-- **没有摘要节点**：单篇短文档 L0 缓冲区未满 5 万 token，需调用 `POST /memory/tree/flush` 才会密封。
+- **没有摘要节点**：L0 在 `token_sum ≥ 50000` 或 `≥10` 条叶子时自动密封；低流量源需 `POST /memory/tree/flush`（`max_age_ms` 默认 7 天）或 `POST /memory/tree/flush/tree` 立即强制密封。
 - **query 无结果**：确认 `namespace` 与摄入时一致（会做 sanitize，空串变为 `global`）。
 - **表不存在**：未执行 `init.sql` 时 API 会 500，先在 PKM 库跑一遍初始化脚本。
 - **LLM 摘要**：未配置 `MEMORY_SUMMARIZER_API_*` 时仍有效，密封走 `fallback`；要测 LLM 先配 `.env` 再调 `summarize/preview`。
@@ -171,12 +172,15 @@ npx tsx src/api.ts
 | POST | `/memory/tree/query/topic` | 按实体主题查询 |
 | POST | `/memory/tree/query/global` | 全局日摘要查询 |
 | POST | `/memory/tree/walk` | 遍历某棵树上的摘要层级 |
-| POST | `/memory/tree/flush` | 强制密封过期 L0 缓冲区（默认 7 天） |
+| POST | `/memory/tree/flush` | 时间触发密封陈旧 L0（默认 7 天，返回 `seals`） |
+| POST | `/memory/tree/flush/tree` | 立即强制密封单棵树（`tree_id` 或 `kind`+`scope`） |
 | POST | `/memory/tree/digest` | 构建全局日摘要 |
 | POST | `/memory/tree/sync` | 将已有 memory 分块同步进 Tree |
 | POST | `/memory/tree/summarize/preview` | 试跑摘要器（不写入树，用于联调 LLM） |
 
-`POST /memory/documents/ingest` 会在写入 unified memory 后**自动**同步到 Memory Tree（admit → L0 buffer → 达阈值密封）。
+`POST /memory/documents/ingest` 会在写入 unified memory 后**自动**同步到 Memory Tree，并在摄入结束后**强制密封**该源树（返回 `tree.seals`）。平时追加叶子时仍按 openhuman `should_seal`（5 万 token 或 10 条）自动向上密封。
+
+删除文档 / 清空 namespace 会同步清理对应 `mem_tree_*` 数据；`query` / `recall` 会纳入 namespace 内 KV 条目。
 
 ### 摘要器（LLM 接口）
 
@@ -234,8 +238,12 @@ curl -X POST http://localhost:3001/memory/tree/query/source \
   -H "Content-Type: application/json" \
   -d '{"user_id":0,"source_id":"doc:notes:<document_id>","query":"密封","limit":5}'
 
-# 密封闲置缓冲区并生成全局摘要
-curl -X POST http://localhost:3001/memory/tree/flush -H "Content-Type: application/json" -d '{"user_id":0}'
+# 立即强制密封某源树（小文档）
+curl -X POST http://localhost:3001/memory/tree/flush/tree \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":0,"kind":"source","scope":"doc:notes:<document_id>"}'
+# 或密封 7 天前的 L0 缓冲区
+curl -X POST http://localhost:3001/memory/tree/flush -H "Content-Type: application/json" -d '{"user_id":0,"max_age_ms":0}'
 curl -X POST http://localhost:3001/memory/tree/digest -H "Content-Type: application/json" -d '{"user_id":0}'
 ```
 

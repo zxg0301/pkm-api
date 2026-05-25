@@ -120,3 +120,9 @@ export interface MemoryIngestionResult {
   relation_count: number;
   chunk_count: number;
 }
+
+export interface MemoryTreeSyncResult {
+  admitted: number;
+  dropped: number;
+  seals: number;
+}

@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Pool } from "pg";
+import { parseUserId, readJsonBody } from "./http.js";
 import { MemoryRetrieval } from "./retrieval.js";
 import { MemoryStore, resolveNamespaceParam } from "./store.js";
 import { sanitizeNamespace } from "./sanitize.js";
@@ -14,21 +15,6 @@ function setMemoryCORS(res: ServerResponse) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-}
-
-function parseUserId(url: URL, body?: Record<string, unknown>): number {
-  const fromQuery = url.searchParams.get("user_id");
-  const raw = fromQuery ?? (body?.user_id != null ? String(body.user_id) : "0");
-  const id = parseInt(raw, 10);
-  return Number.isNaN(id) ? 0 : id;
-}
-
-async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
-  const raw = Buffer.concat(chunks).toString("utf8");
-  if (!raw.trim()) return {};
-  return JSON.parse(raw) as Record<string, unknown>;
 }
 
 function docInputFromBody(body: Record<string, unknown>): NamespaceDocumentInput {
@@ -141,11 +127,11 @@ export async function handleMemoryRoute(
     if (req.method === "DELETE" && /^\/memory\/documents\/[^/]+\/[^/]+$/.test(path)) {
       const userId = parseUserId(url);
       const [, , , nsRaw, docId] = path.split("/");
-      const result = await store.deleteDocument(
-        userId,
-        decodeURIComponent(nsRaw),
-        decodeURIComponent(docId),
-      );
+      const ns = decodeURIComponent(nsRaw);
+      const documentId = decodeURIComponent(docId);
+      await store.graphRemoveDocument(userId, ns, documentId);
+      const result = await store.deleteDocument(userId, ns, documentId);
+      await treePipeline.deleteSourceTree(userId, ns, documentId);
       json(res, 200, { user_id: userId, ...result });
       return true;
     }
@@ -155,6 +141,7 @@ export async function handleMemoryRoute(
       const userId = parseUserId(url);
       const ns = decodeURIComponent(path.split("/").pop()!);
       await store.clearNamespace(userId, ns);
+      await treePipeline.deleteNamespaceTrees(userId, ns);
       json(res, 200, { user_id: userId, cleared: true, namespace: resolveNamespaceParam(ns) });
       return true;
     }
@@ -276,7 +263,11 @@ export async function handleMemoryRoute(
     return true;
   } catch (err) {
     const message = err instanceof Error ? err.message : "memory error";
-    if (message.includes("required") || message.includes("cannot be empty")) {
+    if (
+      message.includes("required") ||
+      message.includes("cannot be empty") ||
+      message.includes("invalid JSON")
+    ) {
       json(res, 400, { error: message });
       return true;
     }

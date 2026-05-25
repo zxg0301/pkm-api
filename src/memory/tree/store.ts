@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from "pg";
+import { sanitizeNamespace } from "../sanitize.js";
 import type { BufferRow, LifecycleStatus, SummaryRow, TreeChunkRow, TreeKind, TreeRow, TreeStatus } from "./types.js";
 
 export function treeId(userId: number, kind: TreeKind, scope: string): string {
@@ -354,6 +355,30 @@ export class TreeStore {
       [userId, entityId, ts],
     );
     return Number(rows[0]?.last_hotness ?? 0);
+  }
+
+  /** 删除某源树及其块（openhuman 删文档时需清理 mem_tree_*） */
+  async deleteSourceTree(userId: number, sourceId: string): Promise<void> {
+    const id = treeId(userId, "source", sourceId);
+    await this.pool.query(`DELETE FROM PKM.mem_tree_chunks WHERE user_id = $1 AND source_id = $2`, [
+      userId,
+      sourceId,
+    ]);
+    await this.pool.query(`DELETE FROM PKM.mem_tree_trees WHERE user_id = $1 AND id = $2`, [userId, id]);
+  }
+
+  /** 清空某 namespace 下所有 doc 源树 */
+  async deleteSourceTreesForNamespace(userId: number, namespace: string): Promise<void> {
+    const ns = sanitizeNamespace(namespace);
+    const prefix = `doc:${ns}:%`;
+    await this.pool.query(`DELETE FROM PKM.mem_tree_chunks WHERE user_id = $1 AND source_id LIKE $2`, [
+      userId,
+      prefix,
+    ]);
+    await this.pool.query(
+      `DELETE FROM PKM.mem_tree_trees WHERE user_id = $1 AND kind = 'source' AND scope LIKE $2`,
+      [userId, prefix],
+    );
   }
 
   async stats(userId: number): Promise<Record<string, number>> {

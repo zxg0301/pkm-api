@@ -85,6 +85,28 @@ function composeScore(keyword: number, graph: number, freshness: number, priorit
   };
 }
 
+function renderKvValue(value: unknown): string {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/** openhuman `kv_priority_signal` */
+function kvPrioritySignal(key: string, value: unknown): number {
+  const keyNorm = key.toLowerCase();
+  const valueNorm = renderKvValue(value).toLowerCase();
+  let score = 0.3;
+  if (["preference", "decision", "profile", "setting", "owner"].some((n) => keyNorm.includes(n) || valueNorm.includes(n))) {
+    score += 0.35;
+  }
+  if (value !== null && typeof value === "object") score += 0.15;
+  return Math.min(1, score);
+}
+
 export class MemoryRetrieval {
   constructor(private readonly store: MemoryStore) {}
 
@@ -119,6 +141,7 @@ export class MemoryRetrieval {
     const ns = sanitizeNamespace(namespace);
     const docs = await this.store.loadDocumentsForScope(userId, ns);
     const relations = await this.store.graphQuery(userId, ns);
+    const kvs = await this.store.kvListNamespace(userId, ns);
     const terms = queryTerms(query);
 
     const ftsHits = !recallOnly && query.trim() ? await this.store.searchChunks(userId, ns, query, 50) : [];
@@ -158,6 +181,32 @@ export class MemoryRetrieval {
         chunk_id: best?.chunk_id ?? null,
         updated_at: doc.updated_at,
         supporting_relations: matched,
+      });
+    }
+
+    for (const kv of kvs) {
+      const rendered = renderKvValue(kv.value);
+      const keyword = recallOnly
+        ? kvPrioritySignal(kv.key, kv.value) + 0.1
+        : keywordScore(terms, [kv.key, rendered]);
+      const fresh = 0.5;
+      const breakdown = composeScore(keyword, 0, fresh, "medium");
+      if (breakdown.final_score <= 0 && !recallOnly) continue;
+
+      hits.push({
+        kind: "kv",
+        namespace: ns,
+        key: kv.key,
+        title: null,
+        content: rendered.slice(0, 4000),
+        category: "kv",
+        source_type: null,
+        score: breakdown.final_score,
+        score_breakdown: breakdown,
+        document_id: null,
+        chunk_id: null,
+        updated_at: new Date().toISOString(),
+        supporting_relations: [],
       });
     }
 

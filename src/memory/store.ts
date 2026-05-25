@@ -95,15 +95,18 @@ export class MemoryStore {
   async ingestDocument(userId: number, input: NamespaceDocumentInput): Promise<MemoryIngestionResult> {
     const documentId = await this.putDocument(userId, input);
     const ns = sanitizeNamespace(input.namespace);
-    const { rows } = await this.pool.query(
-      `SELECT count(*)::int AS c FROM PKM.memory_chunks WHERE user_id = $1 AND namespace = $2 AND document_id = $3`,
-      [userId, ns, documentId],
-    );
+    const [chunkRes, graphRes] = await Promise.all([
+      this.pool.query(
+        `SELECT count(*)::int AS c FROM PKM.memory_chunks WHERE user_id = $1 AND namespace = $2 AND document_id = $3`,
+        [userId, ns, documentId],
+      ),
+      this.graphQuery(userId, ns),
+    ]);
     return {
       document_id: documentId,
       entity_count: 0,
-      relation_count: 0,
-      chunk_count: Number(rows[0]?.c ?? 0),
+      relation_count: graphRes.length,
+      chunk_count: Number(chunkRes.rows[0]?.c ?? 0),
     };
   }
 
@@ -157,15 +160,24 @@ export class MemoryStore {
     limit = 50,
   ): Promise<{ document_id: string; chunk_id: string; text: string; rank: number }[]> {
     const ns = sanitizeNamespace(namespace);
+    const q = query.trim();
+    if (!q) return [];
+    const likePattern = `%${q.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_")}%`;
     const { rows } = await this.pool.query(
       `SELECT document_id, chunk_id, text,
-              ts_rank(to_tsvector('simple', text), plainto_tsquery('simple', $3)) AS rank
+              GREATEST(
+                ts_rank(to_tsvector('simple', text), plainto_tsquery('simple', $3)),
+                CASE WHEN text ILIKE $4 ESCAPE '\\' THEN 0.25 ELSE 0 END
+              ) AS rank
        FROM PKM.memory_chunks
        WHERE user_id = $1 AND namespace = $2
-         AND to_tsvector('simple', text) @@ plainto_tsquery('simple', $3)
+         AND (
+           to_tsvector('simple', text) @@ plainto_tsquery('simple', $3)
+           OR text ILIKE $4 ESCAPE '\\'
+         )
        ORDER BY rank DESC
-       LIMIT $4`,
-      [userId, ns, query, limit],
+       LIMIT $5`,
+      [userId, ns, q, likePattern, limit],
     );
     return rows.map((r) => ({
       document_id: String(r.document_id),
@@ -283,6 +295,51 @@ export class MemoryStore {
          ON CONFLICT (user_id, subject, predicate, object)
          DO UPDATE SET attrs_json = EXCLUDED.attrs_json, updated_at = EXCLUDED.updated_at`,
         [userId, subject, predicate, object, JSON.stringify(attrs), now],
+      );
+    }
+  }
+
+  /**
+   * 删除文档时清理图谱证据（openhuman `graph_remove_document_namespace` 简化版）。
+   * 若 attrs 含 document_ids / chunk_ids 则更新或删除关系行。
+   */
+  async graphRemoveDocument(userId: number, namespace: string, documentId: string): Promise<void> {
+    const ns = sanitizeNamespace(namespace);
+    const relations = await this.graphQuery(userId, ns);
+    if (relations.length === 0) return;
+
+    const docPrefix = `${documentId}:`;
+    const now = new Date().toISOString();
+
+    for (const rel of relations) {
+      const docIds = Array.isArray(rel.attrs.document_ids)
+        ? (rel.attrs.document_ids as string[]).filter((id) => typeof id === "string")
+        : [];
+      const chunkIds = Array.isArray(rel.attrs.chunk_ids)
+        ? (rel.attrs.chunk_ids as string[]).filter((id) => typeof id === "string")
+        : [];
+      const touches =
+        docIds.includes(documentId) || chunkIds.some((cid) => cid.startsWith(docPrefix));
+      if (!touches) continue;
+
+      const nextDocIds = docIds.filter((id) => id !== documentId);
+      const nextChunkIds = chunkIds.filter((cid) => !cid.startsWith(docPrefix));
+
+      if (nextDocIds.length === 0 && nextChunkIds.length === 0) {
+        await this.pool.query(
+          `DELETE FROM PKM.memory_graph_namespace
+           WHERE user_id = $1 AND namespace = $2 AND subject = $3 AND predicate = $4 AND object = $5`,
+          [userId, ns, rel.subject, rel.predicate, rel.object],
+        );
+        continue;
+      }
+
+      const attrs = { ...rel.attrs, document_ids: nextDocIds, chunk_ids: nextChunkIds };
+      await this.pool.query(
+        `UPDATE PKM.memory_graph_namespace
+         SET attrs_json = $6, updated_at = $7
+         WHERE user_id = $1 AND namespace = $2 AND subject = $3 AND predicate = $4 AND object = $5`,
+        [userId, ns, rel.subject, rel.predicate, rel.object, JSON.stringify(attrs), now],
       );
     }
   }

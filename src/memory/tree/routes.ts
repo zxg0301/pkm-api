@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Pool } from "pg";
+import { parseUserId, readJsonBody } from "../http.js";
 import { sanitizeNamespace } from "../sanitize.js";
 import { createSummarizer } from "./summarizer/index.js";
 import { TreePipeline } from "./pipeline.js";
@@ -8,20 +9,6 @@ import { DEFAULT_FLUSH_AGE_MS, OUTPUT_TOKEN_BUDGET } from "./types.js";
 import type { SummaryInput } from "./types.js";
 
 type JsonFn = (res: ServerResponse, status: number, data: unknown) => void;
-
-function parseUserId(url: URL, body?: Record<string, unknown>): number {
-  const raw = url.searchParams.get("user_id") ?? (body?.user_id != null ? String(body.user_id) : "0");
-  const id = parseInt(raw, 10);
-  return Number.isNaN(id) ? 0 : id;
-}
-
-async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
-  const raw = Buffer.concat(chunks).toString("utf8");
-  if (!raw.trim()) return {};
-  return JSON.parse(raw) as Record<string, unknown>;
-}
 
 export async function handleMemoryTreeRoute(
   req: IncomingMessage,
@@ -161,13 +148,39 @@ export async function handleMemoryTreeRoute(
       return true;
     }
 
-    // POST /memory/tree/flush — 密封过期 L0 缓冲区
+    // POST /memory/tree/flush — 密封过期 L0 缓冲区（openhuman flush_stale_buffers）
     if (req.method === "POST" && path === "/memory/tree/flush") {
       const body = await readJsonBody(req);
       const userId = parseUserId(url, body);
       const maxAge = body.max_age_ms != null ? Number(body.max_age_ms) : DEFAULT_FLUSH_AGE_MS;
-      const flushed = await pipeline.flushStale(userId, maxAge);
-      json(res, 200, { user_id: userId, flushed_buffers: flushed });
+      const seals = await pipeline.flushStale(userId, maxAge);
+      json(res, 200, {
+        user_id: userId,
+        seals,
+        /** @deprecated 与 `seals` 相同，保留兼容 */
+        flushed_buffers: seals,
+      });
+      return true;
+    }
+
+    // POST /memory/tree/flush/tree — 强制密封单棵树（openhuman force_flush_tree）
+    if (req.method === "POST" && path === "/memory/tree/flush/tree") {
+      const body = await readJsonBody(req);
+      const userId = parseUserId(url, body);
+      let treeId = body.tree_id != null ? String(body.tree_id) : "";
+      if (!treeId && body.kind != null && body.scope != null) {
+        const kind = String(body.kind) as "source" | "topic" | "global";
+        const scope = String(body.scope);
+        const trees = await store.listTrees(userId, kind);
+        const t = trees.find((x) => x.scope === scope);
+        treeId = t?.id ?? "";
+      }
+      if (!treeId) {
+        json(res, 400, { error: "tree_id or (kind + scope) is required" });
+        return true;
+      }
+      const sealedIds = await pipeline.forceFlushTree(userId, treeId);
+      json(res, 200, { user_id: userId, tree_id: treeId, seals: sealedIds.length, summary_ids: sealedIds });
       return true;
     }
 
@@ -248,6 +261,7 @@ export async function handleMemoryTreeRoute(
         "POST /memory/tree/query/global",
         "POST /memory/tree/walk",
         "POST /memory/tree/flush",
+        "POST /memory/tree/flush/tree",
         "POST /memory/tree/digest",
         "POST /memory/tree/sync",
         "POST /memory/tree/summarize/preview",
@@ -255,6 +269,11 @@ export async function handleMemoryTreeRoute(
     });
     return true;
   } catch (err) {
+    const message = err instanceof Error ? err.message : "memory tree error";
+    if (message.includes("invalid JSON") || message.includes("not found")) {
+      json(res, message.includes("not found") ? 404 : 400, { error: message });
+      return true;
+    }
     throw err;
   }
 }

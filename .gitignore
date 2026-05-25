@@ -21,3 +21,5 @@ Thumbs.db
 
 # Archive
 *.zip
+
+*.npm-cache

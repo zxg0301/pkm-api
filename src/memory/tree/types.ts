@@ -12,6 +12,7 @@ export type LifecycleStatus =
 export const INPUT_TOKEN_BUDGET = 50_000;
 export const OUTPUT_TOKEN_BUDGET = 5_000;
 export const SUMMARY_FANOUT = 10;
+/** 与 openhuman `DEFAULT_FLUSH_AGE_SECS`（7 天）一致 */
 export const DEFAULT_FLUSH_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 export const TOPIC_CREATION_THRESHOLD = 10;
 export const MIN_ADMIT_CHARS = 20;

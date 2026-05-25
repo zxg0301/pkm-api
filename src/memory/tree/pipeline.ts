@@ -29,7 +29,7 @@ export class TreePipeline {
     documentId: string,
     chunks: { chunk_id: string; text: string }[],
     title?: string,
-  ): Promise<{ admitted: number; dropped: number }> {
+  ): Promise<{ admitted: number; dropped: number; seals: number }> {
     const sourceId = docSourceId(namespace, documentId);
     const tree = await this.store.getOrCreateTree(userId, "source", sourceId);
     let admitted = 0;
@@ -59,14 +59,35 @@ export class TreePipeline {
 
       await this.store.setChunkLifecycle(userId, treeChunkId, "admitted");
       await this.store.setChunkLifecycle(userId, treeChunkId, "buffered");
-      await this.sealer.appendLeaf(userId, tree.id, "source", treeChunkId, approxTokenCount(text));
+      await this.sealer.appendLeaf(
+        userId,
+        tree.id,
+        "source",
+        treeChunkId,
+        approxTokenCount(text),
+        ts + i,
+      );
       admitted++;
 
       await this.routeTopicsFromText(userId, text, sourceId);
     }
 
     await this.ensureGlobalTree(userId);
-    return { admitted, dropped };
+
+    let seals = 0;
+    if (admitted > 0) {
+      const sealedIds = await this.sealer.forceFlushTree(userId, tree.id);
+      seals = sealedIds.length;
+    }
+    return { admitted, dropped, seals };
+  }
+
+  async deleteSourceTree(userId: number, namespace: string, documentId: string): Promise<void> {
+    await this.store.deleteSourceTree(userId, docSourceId(namespace, documentId));
+  }
+
+  async deleteNamespaceTrees(userId: number, namespace: string): Promise<void> {
+    await this.store.deleteSourceTreesForNamespace(userId, namespace);
   }
 
   /** 从图谱关系与文本中的实体路由到主题树 */
@@ -111,13 +132,18 @@ export class TreePipeline {
       await this.store.setChunkLifecycle(userId, pseudoId, "buffered");
       await this.sealer.appendLeaf(userId, tree.id, "global", pseudoId, s.token_count);
     }
-    await this.sealer.cascadeSeal(userId, tree.id, "global", 0);
+    await this.sealer.forceFlushTree(userId, tree.id);
     const updated = await this.store.getTree(userId, tree.id);
     return updated?.root_id ?? null;
   }
 
   async flushStale(userId: number, maxAgeMs = DEFAULT_FLUSH_AGE_MS): Promise<number> {
     return this.sealer.flushStaleBuffers(userId, maxAgeMs);
+  }
+
+  /** 立即强制密封指定树（openhuman `force_flush_tree`） */
+  async forceFlushTree(userId: number, treeId: string): Promise<string[]> {
+    return this.sealer.forceFlushTree(userId, treeId);
   }
 
   getStore(): TreeStore {
