@@ -3,7 +3,28 @@
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
 import { pool, minioClient, MINIO_BUCKET } from "./common.js";
 
-// ── CORS + JSON 响应辅助 ──
+/** 默认关闭；设为 true 时才挂载 /memory/* 路由（动态加载，不影响原有知识库 API） */
+const MEMORY_API_ENABLED = process.env.MEMORY_API_ENABLED === "true";
+
+type MemoryRouteHandler = (
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  json: (res: ServerResponse, status: number, data: unknown) => void,
+  pool: typeof import("./common.js").pool,
+) => Promise<boolean>;
+
+let handleMemoryRoute: MemoryRouteHandler | null = null;
+
+async function loadMemoryRoutes(): Promise<MemoryRouteHandler> {
+  if (!handleMemoryRoute) {
+    const mod = await import("./memory/routes.js");
+    handleMemoryRoute = mod.handleMemoryRoute;
+  }
+  return handleMemoryRoute;
+}
+
+// ── CORS + JSON 响应辅助（知识库原有接口） ──
 function setCORS(res: ServerResponse) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -30,6 +51,14 @@ async function handler(req: IncomingMessage, res: ServerResponse) {
   const path = url.pathname;
 
   try {
+    // Memory 为可选模块：未启用时 /memory/* 不会进入 memory 处理器
+    if (MEMORY_API_ENABLED && path.startsWith("/memory")) {
+      const memoryHandler = await loadMemoryRoutes();
+      if (await memoryHandler(req, res, url, json, pool)) {
+        return;
+      }
+    }
+
     // GET /knowledge?user_id=0  — 获取用户所有知识文档列表
     if (req.method === "GET" && path === "/knowledge") {
       const userId = parseInt(url.searchParams.get("user_id") ?? "0", 10);
@@ -122,7 +151,10 @@ async function handler(req: IncomingMessage, res: ServerResponse) {
       return;
     }
 
-    json(res, 404, { error: "Not found", available: ["/knowledge", "/knowledge/:id", "/attachments", "/attachment/:id"] });
+    json(res, 404, {
+      error: "Not found",
+      available: ["/knowledge", "/knowledge/:id", "/attachments", "/attachment/:id"],
+    });
   } catch (err) {
     console.error("API error:", err);
     json(res, 500, { error: "Internal server error" });
@@ -130,6 +162,11 @@ async function handler(req: IncomingMessage, res: ServerResponse) {
 }
 
 async function main() {
+  if (MEMORY_API_ENABLED) {
+    await loadMemoryRoutes();
+    console.log("Memory API enabled (/memory/*)");
+  }
+
   createServer(handler).listen(API_PORT, () => {
     console.log(`REST API server listening on http://0.0.0.0:${API_PORT}`);
   });
