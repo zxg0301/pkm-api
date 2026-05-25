@@ -20,11 +20,14 @@
 | 变量 | 说明 |
 |------|------|
 | `DATABASE_URL` | PostgreSQL 连接字符串 |
-| `MINIO_ENDPOINT` | MinIO 地址 |
-| `MINIO_PORT` | MinIO 端口 |
-| `MINIO_ACCESS_KEY` | MinIO 访问密钥 |
-| `MINIO_SECRET_KEY` | MinIO 秘密密钥 |
-| `MINIO_BUCKET` | MinIO Bucket 名称 |
+| `S3_ENDPOINT` | S3 兼容端点 URL（如 MinIO：`http://127.0.0.1:9000`；真实 AWS 可省略） |
+| `AWS_ACCESS_KEY_ID` | 访问密钥 |
+| `AWS_SECRET_ACCESS_KEY` | 秘密密钥 |
+| `AWS_REGION` | 区域，默认 `us-east-1` |
+| `S3_BUCKET` | Bucket 名称 |
+
+仍支持旧版 `MINIO_*` 变量（`MINIO_ENDPOINT`/`MINIO_PORT` 等），便于迁移。
+
 | `API_PORT` | REST API 服务端口，默认 3001 |
 
 ## Docker 启动
@@ -45,7 +48,8 @@ docker compose up --build
 
 - `api`：`http://localhost:3001`
 - `db`：PostgreSQL
-- `minio`：附件对象存储
+- `s3`：S3 兼容对象存储（MinIO，`http://localhost:9000`；控制台 `http://localhost:9001`）
+- `s3-init`：启动时用 AWS CLI 创建 `knowledgemap` bucket（一次性任务）
 
 ## 连接 EduNex
 

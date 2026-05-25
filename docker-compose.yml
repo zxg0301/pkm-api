@@ -5,17 +5,17 @@ services:
       - "3001:3001"
     environment:
       DATABASE_URL: postgresql://postgres:123456@db:5432/PKM
-      MINIO_ENDPOINT: minio
-      MINIO_PORT: 9000
-      MINIO_USE_SSL: "false"
-      MINIO_ACCESS_KEY: root
-      MINIO_SECRET_KEY: "88888888"
-      MINIO_REGION: us-east-1
-      MINIO_BUCKET: knowledgemap
+      S3_ENDPOINT: http://s3:9000
+      AWS_ACCESS_KEY_ID: root
+      AWS_SECRET_ACCESS_KEY: "88888888"
+      AWS_REGION: us-east-1
+      S3_BUCKET: knowledgemap
       API_PORT: 3001
     depends_on:
-      - db
-      - minio
+      db:
+        condition: service_healthy
+      s3-init:
+        condition: service_completed_successfully
 
   db:
     image: postgres:16-alpine
@@ -28,8 +28,13 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d PKM"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
-  minio:
+  s3:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
@@ -39,8 +44,37 @@ services:
       - "9000:9000"
       - "9001:9001"
     volumes:
-      - miniodata:/data
+      - s3data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  s3-init:
+    image: amazon/aws-cli:2.27.25
+    depends_on:
+      s3:
+        condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: root
+      AWS_SECRET_ACCESS_KEY: "88888888"
+      AWS_DEFAULT_REGION: us-east-1
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        EP=http://s3:9000
+        BUCKET=knowledgemap
+        if aws s3api head-bucket --bucket "$$BUCKET" --endpoint-url "$$EP" 2>/dev/null; then
+          echo "Bucket $$BUCKET already exists"
+        else
+          aws s3 mb "s3://$$BUCKET" --endpoint-url "$$EP"
+          echo "Created bucket $$BUCKET"
+        fi
+    restart: "no"
 
 volumes:
   pgdata:
-  miniodata:
+  s3data:

@@ -2,5 +2,6 @@ node_modules
 dist
 .git
 .env
+.npm-cache
 .DS_Store
 *.log

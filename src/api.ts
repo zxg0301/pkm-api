@@ -2,7 +2,8 @@
 
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
 import Busboy from "busboy";
-import { pool, minioClient, MINIO_BUCKET } from "./common.js";
+import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
+import { pool, s3Client, S3_BUCKET } from "./common.js";
 
 // ── CORS + JSON 响应辅助 ──
 function setCORS(res: ServerResponse) {
@@ -159,12 +160,18 @@ async function handler(req: IncomingMessage, res: ServerResponse) {
       }
       const att = rows[0];
       const encodedName = encodeURIComponent(att.file_name);
-      const dataStream = await minioClient.getObject(MINIO_BUCKET, att.minio_key);
+      const { Body } = await s3Client.send(
+        new GetObjectCommand({ Bucket: S3_BUCKET, Key: att.minio_key }),
+      );
+      if (!Body || typeof (Body as NodeJS.ReadableStream).pipe !== "function") {
+        json(res, 500, { error: "Failed to read attachment from object storage" });
+        return;
+      }
       res.writeHead(200, {
         "Content-Type": att.content_type ?? "application/octet-stream",
         "Content-Disposition": `attachment; filename="${encodedName}"; filename*=UTF-8''${encodedName}`,
       });
-      dataStream.pipe(res);
+      (Body as NodeJS.ReadableStream).pipe(res);
       return;
     }
 
@@ -233,9 +240,14 @@ async function handler(req: IncomingMessage, res: ServerResponse) {
 
           for (const entry of fileEntries) {
             const minioKey = `${userId}/${doc.id}/${entry.fileName}`;
-            await minioClient.putObject(MINIO_BUCKET, minioKey, entry.buffer, entry.buffer.length, {
-              "Content-Type": entry.contentType,
-            });
+            await s3Client.send(
+              new PutObjectCommand({
+                Bucket: S3_BUCKET,
+                Key: minioKey,
+                Body: entry.buffer,
+                ContentType: entry.contentType,
+              }),
+            );
 
             const { rows: attRows } = await pool.query(
               `INSERT INTO PKM.attachments (doc_id, file_name, minio_key, content_type, file_size)
@@ -344,7 +356,7 @@ async function handler(req: IncomingMessage, res: ServerResponse) {
         return;
       }
 
-      // 获取附件的 MinIO key 以便清理对象存储
+      // 获取附件的对象 key 以便清理对象存储
       const { rows: attRows } = await pool.query(
         `SELECT minio_key FROM PKM.attachments WHERE doc_id = $1`,
         [id],
@@ -354,12 +366,14 @@ async function handler(req: IncomingMessage, res: ServerResponse) {
       await pool.query(`DELETE FROM PKM.attachments WHERE doc_id = $1`, [id]);
       await pool.query(`DELETE FROM PKM.knowledge_docs WHERE id = $1 AND user_id = $2`, [id, userId]);
 
-      // 清理 MinIO 对象
+      // 清理对象存储
       for (const att of attRows) {
         try {
-          await minioClient.removeObject(MINIO_BUCKET, att.minio_key);
+          await s3Client.send(
+            new DeleteObjectCommand({ Bucket: S3_BUCKET, Key: att.minio_key }),
+          );
         } catch (err) {
-          console.error(`Failed to remove MinIO object ${att.minio_key}:`, err);
+          console.error(`Failed to remove S3 object ${att.minio_key}:`, err);
         }
       }
 
